@@ -5,7 +5,7 @@ import "fmt"
 import "mapreduce"
 import "strings"
 import "strconv"
-import "unicode"
+import "unicodesh "
 
 import "container/list"
 
