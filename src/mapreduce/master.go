@@ -69,8 +69,10 @@ func distributeJob(mr *MapReduce, jobType JobType) {
 		if mr.UserWorkerList.Len() < 1 {
 			continue
 		} else {
-			doJobNum(mr, i, otherJob, jobType, resultMap)
-			i++
+			result := doJobNum(mr, i, otherJob, jobType, resultMap)
+			if result {
+				i++
+			}
 		}
 	}
 
@@ -79,10 +81,10 @@ func distributeJob(mr *MapReduce, jobType JobType) {
 	<-done
 }
 
-func doJobNum(mr *MapReduce, jobNum int, otherJobNum int, jobType JobType, resultMap SyncMap) {
+func doJobNum(mr *MapReduce, jobNum int, otherJobNum int, jobType JobType, resultMap SyncMap) bool {
 	if mr.UserWorkerList.Len() < 1 {
-		fmt.Println("no userful wo")
-		return
+		fmt.Println("no userful worker")
+		return false
 	}
 	resultMap.Lock()
 	resultMap.m[strconv.Itoa(jobNum)] = "doing"
@@ -109,6 +111,7 @@ func doJobNum(mr *MapReduce, jobNum int, otherJobNum int, jobType JobType, resul
 			resultMap.Unlock()
 		}
 	}()
+	return true
 }
 func handlerFailure(mr *MapReduce, jobType JobType, jobNum int, otherJobNum int, resultMap SyncMap, done chan bool) {
 	for {
