@@ -2,10 +2,17 @@ package mapreduce
 
 import "container/list"
 import "fmt"
+import "sync"
+import "strconv"
 
 type WorkerInfo struct {
 	address string
 	// You can add definitions here.
+}
+
+type SyncMap struct {
+	sync.RWMutex
+	m map[string]string
 }
 
 // Clean up all workers by sending a Shutdown RPC to each one of them Collect
@@ -27,8 +34,6 @@ func (mr *MapReduce) KillWorkers() *list.List {
 }
 
 func (mr *MapReduce) RunMaster() *list.List {
-	// Your code here
-
 	go func() {
 		for {
 			select {
@@ -36,21 +41,22 @@ func (mr *MapReduce) RunMaster() *list.List {
 				workInfo := WorkerInfo{newWorkerAddress}
 				mr.Workers[newWorkerAddress] = &workInfo
 				mr.UserWorkerList.PushFront(workInfo)
-				fmt.Println("worker register to master")
+				fmt.Printf("worker %s register to master\n", newWorkerAddress)
 			default:
 			}
 		}
 	}()
 
-	doMasterMap(mr, Map)
-	doMasterMap(mr, Reduce)
+	distributeJob(mr, Map)
+	distributeJob(mr, Reduce)
 	return mr.KillWorkers()
 }
 
-func doMasterMap(mr *MapReduce, jobType JobType) {
+func distributeJob(mr *MapReduce, jobType JobType) {
 	var nJob int
 	var otherJob int
-	chanMap := make(map[int]chan bool)
+	resultMap := SyncMap{m: make(map[string]string)}
+	done := make(chan bool)
 	if jobType == Map {
 		nJob = mr.nMap
 		otherJob = mr.nReduce
@@ -63,25 +69,69 @@ func doMasterMap(mr *MapReduce, jobType JobType) {
 		if mr.UserWorkerList.Len() < 1 {
 			continue
 		} else {
-			workInfo := mr.UserWorkerList.Front().Value.(WorkerInfo)
-			jobArg := new(DoJobArgs)
-			jobArg.File = mr.file
-			jobArg.Operation = jobType
-			jobArg.JobNumber = i
-			jobArg.NumOtherPhase = otherJob
-			jobReply := new(DoJobReply)
-			done := make(chan bool)
-			go func() {
-				call(workInfo.address, "Worker.DoJob", jobArg, jobReply)
-				mr.UserWorkerList.PushFront(workInfo)
-				done <- true
-			}()
-			chanMap[i] = done
+			doJobNum(mr, i, otherJob, jobType, resultMap)
 			i++
 		}
 	}
 
-	for _, done := range chanMap {
-		<-done
+	go handlerFailure(mr, jobType, nJob, otherJob, resultMap, done)
+
+	<-done
+}
+
+func doJobNum(mr *MapReduce, jobNum int, otherJobNum int, jobType JobType, resultMap SyncMap) {
+	if mr.UserWorkerList.Len() < 1 {
+		fmt.Println("no userful wo")
+		return
 	}
+	resultMap.Lock()
+	resultMap.m[strconv.Itoa(jobNum)] = "doing"
+	resultMap.Unlock()
+	element := mr.UserWorkerList.Front()
+	workInfo := element.Value.(WorkerInfo)
+	jobArg := new(DoJobArgs)
+	jobArg.File = mr.file
+	jobArg.Operation = jobType
+	jobArg.JobNumber = jobNum
+	jobArg.NumOtherPhase = otherJobNum
+	jobReply := new(DoJobReply)
+	go func() {
+		result := call(workInfo.address, "Worker.DoJob", jobArg, jobReply)
+		if result && jobReply.OK {
+			fmt.Printf("%d %s success \n", jobNum, jobType)
+			resultMap.Lock()
+			resultMap.m[strconv.Itoa(jobNum)] = "success"
+			resultMap.Unlock()
+		} else {
+			fmt.Printf("%d %s fail \n", jobNum, jobType)
+			resultMap.Lock()
+			resultMap.m[strconv.Itoa(jobNum)] = "fail"
+			resultMap.Unlock()
+		}
+	}()
+}
+func handlerFailure(mr *MapReduce, jobType JobType, jobNum int, otherJobNum int, resultMap SyncMap, done chan bool) {
+	for {
+		j := 0
+		for i := 0; i < jobNum; i++ {
+			resultMap.RLock()
+			result, ok := resultMap.m[strconv.Itoa(i)]
+			resultMap.RUnlock()
+			if !ok {
+				continue
+			}
+			if result == "success" {
+				j++
+				continue
+			} else if result == "fail" {
+				fmt.Printf("retry %d %s job \n", i, jobType)
+				doJobNum(mr, i, otherJobNum, jobType, resultMap)
+			}
+		}
+
+		if j >= jobNum {
+			break
+		}
+	}
+	done <- true
 }
