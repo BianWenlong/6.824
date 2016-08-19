@@ -10,13 +10,15 @@ import "os"
 import "sync/atomic"
 
 type ViewServer struct {
-	mu       sync.Mutex
-	l        net.Listener
-	dead     int32 // for testing
-	rpccount int32 // for testing
-	me       string
-
-
+	mu             sync.Mutex
+	l              net.Listener
+	dead           int32 // for testing
+	rpccount       int32 // for testing
+	me             string
+	currentView    View
+	currentViewAck map[uint]bool
+	spTime         map[string]time.Time
+	extraAddress   map[string]bool
 	// Your declarations here.
 }
 
@@ -24,10 +26,70 @@ type ViewServer struct {
 // server Ping RPC handler.
 //
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
+	me := args.Me
+	viewNum := args.Viewnum
+	vs.spTime[me] = time.Now()
+	if vs.currentView.Primary == "" {
+		handlerNoPing(vs, me, viewNum)
+	} else if vs.currentView.Primary == me {
+		handlerPrimeryPing(vs, me, viewNum)
+	} else if vs.currentView.Backup == me {
 
-	// Your code here.
-
+	} else {
+		handlerNoPing(vs, me, viewNum)
+	}
+	reply.View = vs.currentView
 	return nil
+}
+
+func handlerNoPing(vs *ViewServer, me string, viewNum uint) {
+	if vs.currentView.Primary == "" {
+		v := View{1, me, ""}
+		vs.currentView = v
+	} else {
+		vs.extraAddress[me] = true
+	}
+}
+
+func handlerPrimeryPing(vs *ViewServer, me string, viewNum uint) {
+	if viewNum == 0 {
+		if ack, ok := vs.currentViewAck[vs.currentView.Viewnum]; ok && ack {
+			vs.currentView.Primary = vs.currentView.Backup
+			vs.currentView.Backup = ""
+			vs.currentView.Viewnum += 1
+			vs.extraAddress[me] = true
+			backup := ""
+			if len(vs.extraAddress) > 0 {
+				for k, v := range vs.extraAddress {
+					if v {
+						vs.currentView.Backup, backup = k, k
+						break
+					}
+				}
+				if backup != "" {
+					delete(vs.extraAddress, backup)
+				}
+			}
+		}
+		return
+	}
+	vs.currentViewAck[viewNum] = true
+	if vs.currentView.Backup == "" {
+		backup := ""
+		if len(vs.extraAddress) > 0 {
+			for k, v := range vs.extraAddress {
+				if v {
+					vs.currentView.Backup, backup = k, k
+					vs.currentView.Viewnum += 1
+					break
+				}
+			}
+			if backup != "" {
+				delete(vs.extraAddress, backup)
+			}
+		}
+	}
+
 }
 
 //
@@ -35,11 +97,10 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 //
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
-	// Your code here.
+	reply.View = vs.currentView
 
 	return nil
 }
-
 
 //
 // tick() is called once per PingInterval; it should notice
@@ -47,8 +108,65 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 // accordingly.
 //
 func (vs *ViewServer) tick() {
-
+	for k, v := range vs.spTime {
+		interval := time.Now().Sub(v)
+		if interval > PingInterval*DeadPings {
+			handlerDeadServer(vs, k)
+		}
+	}
 	// Your code here.
+}
+
+func handlerDeadServer(vs *ViewServer, me string) {
+	if me == vs.currentView.Primary {
+		handlerPrimaryDead(vs, me)
+	} else if me == vs.currentView.Backup {
+		handlerBackupDead(vs, me)
+	} else {
+		handlerOtherDead(vs, me)
+	}
+}
+func handlerPrimaryDead(vs *ViewServer, me string) {
+	if ack, ok := vs.currentViewAck[vs.currentView.Viewnum]; ok && ack {
+		vs.currentView.Primary = vs.currentView.Backup
+		vs.currentView.Backup = ""
+		vs.currentView.Viewnum += 1
+		backup := ""
+		if len(vs.extraAddress) > 0 {
+			for k, v := range vs.extraAddress {
+				if v {
+					vs.currentView.Backup, backup = k, k
+					break
+				}
+			}
+			if backup != "" {
+				delete(vs.extraAddress, backup)
+			}
+		}
+	}
+}
+
+func handlerBackupDead(vs *ViewServer, me string) {
+	if ack, ok := vs.currentViewAck[vs.currentView.Viewnum]; ok && ack {
+		vs.currentView.Backup = ""
+		vs.currentView.Viewnum += 1
+		backup := ""
+		if len(vs.extraAddress) > 0 {
+			for k, v := range vs.extraAddress {
+				if v {
+					vs.currentView.Backup, backup = k, k
+					break
+				}
+			}
+			if backup != "" {
+				delete(vs.extraAddress, backup)
+			}
+		}
+	}
+}
+
+func handlerOtherDead(vs *ViewServer, me string) {
+	vs.extraAddress[me] = false
 }
 
 //
@@ -76,6 +194,10 @@ func (vs *ViewServer) GetRPCCount() int32 {
 func StartServer(me string) *ViewServer {
 	vs := new(ViewServer)
 	vs.me = me
+	vs.currentView = View{0, "", ""}
+	vs.currentViewAck = make(map[uint]bool)
+	vs.extraAddress = make(map[string]bool)
+	vs.spTime = make(map[string]time.Time)
 	// Your vs.* initializations here.
 
 	// tell net/rpc about our RPC server and handlers.
