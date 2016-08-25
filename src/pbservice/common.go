@@ -4,14 +4,17 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongServer = "ErrWrongServer"
+	ErrDoingOrDone = "ErrDoingOrDone"
 )
 
 type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
+	Key      string
+	Value    string
+	Sequence int64
+	Op       string
 	// You'll have to add definitions here.
 
 	// Field names must start with capital letters,
@@ -23,7 +26,8 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
+	Key      string
+	Sequence int64
 	// You'll have to add definitions here.
 }
 
@@ -32,5 +36,24 @@ type GetReply struct {
 	Value string
 }
 
+type CopyArgs struct {
+	Data        map[string]string
+	HandlResult map[int64]string
+}
+
+type CopyReply struct {
+	Err Err
+}
+
+type ForwardArgs struct {
+	Key      string
+	Value    string
+	Op       string
+	Sequence int64
+}
+
+type ForwardReply struct {
+	Err Err
+}
 
 // Your RPC definitions here.

@@ -12,35 +12,84 @@ import "os"
 import "syscall"
 import "math/rand"
 
-
-
 type PBServer struct {
-	mu         sync.Mutex
-	l          net.Listener
-	dead       int32 // for testing
-	unreliable int32 // for testing
-	me         string
-	vs         *viewservice.Clerk
+	mu           sync.Mutex
+	l            net.Listener
+	dead         int32 // for testing
+	unreliable   int32 // for testing
+	me           string
+	vs           *viewservice.Clerk
+	viewNum      uint
+	primary      string
+	backup       string
+	data         map[string]string
+	handleResult map[int64]string
+	pingFail     int
 	// Your declarations here.
 }
 
-
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
-
-	// Your code here.
-
+	//log.Printf("Server [%s] get key[%s] primary[%s]\n", pb.me, args.Key, pb.primary)
+	if pb.primary != pb.me {
+		reply.Err = ErrWrongServer
+		reply.Value = ""
+		return nil
+	}
+	if value, ok := pb.data[args.Key]; ok {
+		reply.Value = value
+		reply.Err = OK
+	} else {
+		reply.Err = ErrNoKey
+		reply.Value = ""
+	}
 	return nil
 }
-
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
+	//log.Printf("Server[%s] put key[%s] value[%s]\n", pb.me, args.Key, args.Value)
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	if pb.primary != pb.me {
+		//log.Printf("Server [%s] is not Primary! Client should send request to [%s]", pb.me, pb.primary)
+		reply.Err = ErrWrongServer
+		return nil
+	}
 
-	// Your code here.
+	if value, ok := pb.handleResult[args.Sequence]; ok {
+		if value == "doing" || value == "done" {
+			reply.Err = ErrDoingOrDone
+			return nil
+		}
+	} else {
+		pb.handleResult[args.Sequence] = "doing"
+	}
 
-
+	if value, ok := pb.data[args.Key]; ok && args.Op == "Append" {
+		pb.data[args.Key] = value + args.Value
+	} else {
+		pb.data[args.Key] = args.Value
+	}
+	if pb.backup != "" {
+		for {
+			forwardArgs := new(ForwardArgs)
+			forwardArgs.Key = args.Key
+			forwardArgs.Value = args.Value
+			forwardArgs.Sequence = args.Sequence
+			forwardArgs.Op = args.Op
+			forwardReply := new(ForwardReply)
+			result := call(pb.backup, "PBServer.Forward", forwardArgs, forwardReply)
+			if result {
+				reply.Err = OK
+				break
+			} else {
+				pb.tick()
+			}
+		}
+	}
+	pb.handleResult[args.Sequence] = "done"
+	//log.Printf("Done Server put key[%s] value[%s]\n", args.Key, args.Value)
 	return nil
 }
-
 
 //
 // ping the viewserver periodically.
@@ -49,8 +98,60 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 //   manage transfer of state from primary to new backup.
 //
 func (pb *PBServer) tick() {
+	nextView, err := pb.vs.Ping(pb.viewNum)
+	if err == nil {
+		//log.Printf("Server [%s] New View num is [%d], Primary is [%s] ", pb.me, nextView.Viewnum, nextView.Primary)
+		if pb.me == nextView.Primary && pb.backup != nextView.Backup {
+			args := new(CopyArgs)
+			args.Data = pb.data
+			args.HandlResult = pb.handleResult
+			reply := new(CopyReply)
+			call(nextView.Backup, "PBServer.Copy", args, reply)
+		}
+		pb.viewNum = nextView.Viewnum
+		pb.primary = nextView.Primary
+		pb.backup = nextView.Backup
+		pb.pingFail = 0
+	} else {
+		pb.pingFail += 1
+		if pb.pingFail > viewservice.DeadPings {
+			pb.primary = ""
+			pb.backup = ""
+			pb.viewNum = 0
+		}
+	}
+}
 
-	// Your code here.
+func (pb *PBServer) Copy(args *CopyArgs, reply *CopyReply) error {
+	//log.Printf("Backup [%s] receive Date", pb.me)
+	pb.data = args.Data
+	pb.handleResult = args.HandlResult
+	reply.Err = OK
+	return nil
+}
+
+func (pb *PBServer) Forward(args *ForwardArgs, reply *ForwardReply) error {
+	//log.Printf("Backup [%s] receive forward data Key[%s] value [%s] Op [%s]", pb.me, args.Key, args.Value, args.Op)
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	if value, ok := pb.handleResult[args.Sequence]; ok {
+		if value == "doing" || value == "done" {
+			reply.Err = ErrDoingOrDone
+			return nil
+		}
+	} else {
+		pb.handleResult[args.Sequence] = "doing"
+	}
+
+	if value, ok := pb.data[args.Key]; ok && args.Op == "Append" {
+		pb.data[args.Key] = value + args.Value
+	} else {
+		pb.data[args.Key] = args.Value
+	}
+	reply.Err = OK
+	pb.handleResult[args.Sequence] = "done"
+	return nil
 }
 
 // tell the server to shut itself down.
@@ -78,11 +179,17 @@ func (pb *PBServer) isunreliable() bool {
 	return atomic.LoadInt32(&pb.unreliable) != 0
 }
 
-
 func StartServer(vshost string, me string) *PBServer {
 	pb := new(PBServer)
 	pb.me = me
 	pb.vs = viewservice.MakeClerk(me, vshost)
+	pb.viewNum = 0
+	pb.primary = ""
+	pb.backup = ""
+	pb.data = make(map[string]string)
+	pb.handleResult = make(map[int64]string)
+	pb.pingFail = 0
+	pb.tick()
 	// Your pb.* initializations here.
 
 	rpcs := rpc.NewServer()

@@ -4,12 +4,14 @@ import "viewservice"
 import "net/rpc"
 import "fmt"
 
+//import "log"
 import "crypto/rand"
 import "math/big"
-
+import "time"
 
 type Clerk struct {
-	vs *viewservice.Clerk
+	vs      *viewservice.Clerk
+	primary string
 	// Your declarations here
 }
 
@@ -24,11 +26,19 @@ func nrand() int64 {
 func MakeClerk(vshost string, me string) *Clerk {
 	ck := new(Clerk)
 	ck.vs = viewservice.MakeClerk(me, vshost)
-	// Your ck.* initializations here
-
 	return ck
 }
 
+func getPrimary(ck *Clerk) {
+	for {
+		primary := ck.vs.Primary()
+		if primary != "" {
+			ck.primary = primary
+			break
+		}
+		time.Sleep(time.Second)
+	}
+}
 
 //
 // call() sends an RPC to the rpcname handler on server srv
@@ -72,18 +82,59 @@ func call(srv string, rpcname string,
 // says the key doesn't exist (has never been Put().
 //
 func (ck *Clerk) Get(key string) string {
-
-	// Your code here.
-
-	return "???"
+	sequence := nrand()
+	args := new(GetArgs)
+	args.Key = key
+	args.Sequence = sequence
+	reply := new(GetReply)
+	for {
+		result := call(ck.primary, "PBServer.Get", args, reply)
+		if !result {
+			getPrimary(ck)
+			continue
+		}
+		if reply.Err != OK {
+			if reply.Err == ErrWrongServer {
+				getPrimary(ck)
+				continue
+			} else {
+				return ""
+			}
+		} else {
+			return reply.Value
+		}
+	}
+	return ""
 }
 
 //
 // send a Put or Append RPC
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-
-	// Your code here.
+	sequence := nrand()
+	args := new(PutAppendArgs)
+	args.Key = key
+	args.Sequence = sequence
+	args.Value = value
+	args.Op = op
+	reply := new(PutAppendReply)
+	for {
+		//log.Printf("clent put key [%s]  value [%s]  primary [%s] \n", key, value, ck.primary)
+		result := call(ck.primary, "PBServer.PutAppend", args, reply)
+		if !result {
+			getPrimary(ck)
+			continue
+		}
+		if reply.Err != OK {
+			if reply.Err == ErrWrongServer {
+				getPrimary(ck)
+			} else {
+				break
+			}
+		} else {
+			break
+		}
+	}
 }
 
 //

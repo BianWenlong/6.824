@@ -41,7 +41,6 @@ func TestBasicFail(t *testing.T) {
 	vs := viewservice.StartServer(vshost)
 	time.Sleep(time.Second)
 	vck := viewservice.MakeClerk("", vshost)
-
 	ck := MakeClerk(vshost, "")
 
 	fmt.Printf("Test: Single primary, no backup ...\n")
