@@ -29,6 +29,8 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 	me := args.Me
 	viewNum := args.Viewnum
 	vs.spTime[me] = time.Now()
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
 	if vs.currentView.Primary == "" {
 		handlerNoPing(vs, me, viewNum)
 	} else if vs.currentView.Primary == me {
