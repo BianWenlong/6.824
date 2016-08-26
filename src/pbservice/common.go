@@ -38,21 +38,10 @@ type GetReply struct {
 
 type CopyArgs struct {
 	Data        map[string]string
-	HandlResult map[int64]string
+	HandlResult map[int64]bool
 }
 
 type CopyReply struct {
-	Err Err
-}
-
-type ForwardArgs struct {
-	Key      string
-	Value    string
-	Op       string
-	Sequence int64
-}
-
-type ForwardReply struct {
 	Err Err
 }
 

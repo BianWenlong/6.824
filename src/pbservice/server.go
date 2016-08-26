@@ -23,14 +23,14 @@ type PBServer struct {
 	primary      string
 	backup       string
 	data         map[string]string
-	handleResult map[int64]string
+	handleResult map[int64]bool
 	pingFail     int
 	// Your declarations here.
 }
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 	//log.Printf("Server [%s] get key[%s] primary[%s]\n", pb.me, args.Key, pb.primary)
-	if pb.primary != pb.me {
+	if !pb.isPrimary() {
 		reply.Err = ErrWrongServer
 		reply.Value = ""
 		return nil
@@ -45,38 +45,57 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 	return nil
 }
 
+func (pb *PBServer) isPrimary() bool {
+	return pb.primary == pb.me
+}
+
+func (pb *PBServer) isDone(seq int64) bool {
+	value, ok := pb.handleResult[seq]
+	return ok && value
+}
+
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 	//log.Printf("Server[%s] put key[%s] value[%s]\n", pb.me, args.Key, args.Value)
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
-	if pb.primary != pb.me {
+
+	// 判断自己是不是primary
+	if !pb.isPrimary() {
 		//log.Printf("Server [%s] is not Primary! Client should send request to [%s]", pb.me, pb.primary)
 		reply.Err = ErrWrongServer
 		return nil
 	}
 
-	if value, ok := pb.handleResult[args.Sequence]; ok {
-		if value == "doing" || value == "done" {
-			reply.Err = ErrDoingOrDone
-			return nil
-		}
+	pb.handlePutOrAppend(args, reply)
+	//log.Printf("Done Server put key[%s] value[%s]\n", args.Key, args.Value)
+	return nil
+}
+
+func (pb *PBServer) handlePutOrAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	// 判断请求是否已经处理过了
+	if pb.isDone(args.Sequence) {
+		reply.Err = ErrDoingOrDone
+		return
 	} else {
-		pb.handleResult[args.Sequence] = "doing"
+		pb.handleResult[args.Sequence] = true
 	}
 
+	//数据处理
 	if value, ok := pb.data[args.Key]; ok && args.Op == "Append" {
 		pb.data[args.Key] = value + args.Value
 	} else {
 		pb.data[args.Key] = args.Value
 	}
-	if pb.backup != "" {
+
+	//请求发给Backup
+	if pb.backup != "" && pb.isPrimary() {
 		for {
-			forwardArgs := new(ForwardArgs)
+			forwardArgs := new(PutAppendArgs)
 			forwardArgs.Key = args.Key
 			forwardArgs.Value = args.Value
 			forwardArgs.Sequence = args.Sequence
 			forwardArgs.Op = args.Op
-			forwardReply := new(ForwardReply)
+			forwardReply := new(PutAppendReply)
 			result := call(pb.backup, "PBServer.Forward", forwardArgs, forwardReply)
 			if result {
 				reply.Err = OK
@@ -86,9 +105,6 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 			}
 		}
 	}
-	pb.handleResult[args.Sequence] = "done"
-	//log.Printf("Done Server put key[%s] value[%s]\n", args.Key, args.Value)
-	return nil
 }
 
 //
@@ -130,27 +146,12 @@ func (pb *PBServer) Copy(args *CopyArgs, reply *CopyReply) error {
 	return nil
 }
 
-func (pb *PBServer) Forward(args *ForwardArgs, reply *ForwardReply) error {
+func (pb *PBServer) Forward(args *PutAppendArgs, reply *PutAppendReply) error {
 	//log.Printf("Backup [%s] receive forward data Key[%s] value [%s] Op [%s]", pb.me, args.Key, args.Value, args.Op)
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
 
-	if value, ok := pb.handleResult[args.Sequence]; ok {
-		if value == "doing" || value == "done" {
-			reply.Err = ErrDoingOrDone
-			return nil
-		}
-	} else {
-		pb.handleResult[args.Sequence] = "doing"
-	}
-
-	if value, ok := pb.data[args.Key]; ok && args.Op == "Append" {
-		pb.data[args.Key] = value + args.Value
-	} else {
-		pb.data[args.Key] = args.Value
-	}
-	reply.Err = OK
-	pb.handleResult[args.Sequence] = "done"
+	pb.handlePutOrAppend(args, reply)
 	return nil
 }
 
@@ -187,7 +188,7 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.primary = ""
 	pb.backup = ""
 	pb.data = make(map[string]string)
-	pb.handleResult = make(map[int64]string)
+	pb.handleResult = make(map[int64]bool)
 	pb.pingFail = 0
 	pb.tick()
 	// Your pb.* initializations here.
